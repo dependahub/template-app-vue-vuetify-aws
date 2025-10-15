@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Migrate from Amplify Gen1
+
+Parameters:
+  Env:
+    Type: String
+  UserPoolId:
+    Type: String
+  ApiResourcePolicy:
+    Type: String
+    Default: ''
+
+Globals:
+  Api:
+    # デフォルトでStageが作成されるCfnバグへの対応
+    OpenApiVersion: 3.0.1
+    Cors:
+      AllowCredentials: false
+      AllowOrigin: "'*'"
+      AllowMethods: "'DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+  Function:
+    Timeout: 58
+    MemorySize: 512
+    Runtime: nodejs22.x
+    Environment:
+      Variables:
+        ENV: !Ref Env
+        REGION: !Ref AWS::Region
+
+Resources:
+  # --- S3 Bucket ---
+
+  # ユーザーファイル保存用バケット
+  UserBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-user-bucket'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+              - PUT
+              - POST
+              - DELETE
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+
+  # --- API ---
+
+  # API Gateway (REST API)
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}'
+      Description: Application API
+      StageName: !Ref Env
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        AddDefaultAuthorizerToCorsPreflight: false
+      # Policy: !Ref ApiResourcePolicy # 必要な場合はIPホワイトリストを登録(JSON形式) @see https://docs.aws.amazon.com/ja_jp/apigateway/latest/developerguide/apigateway-resource-policies-examples.html
+
+      # 有効にするとCORSエラーが出ます..
+      # BinaryMediaTypes:
+      #   - '*/*'
+
+      # X-Rayを有効にする場合
+      # TracingEnabled: true
+
+      # パスごとにログレベルを設定可能できます
+      # MethodSettings:
+      #   - ResourcePath: "/*"
+      #     HttpMethod: "*"
+      #     LoggingLevel: INFO
+      #     DataTraceEnabled: true
+      #     MetricsEnabled: true
+
+      # AccessLogSetting:
+      #   DestinationArn: !GetAtt RestApiAccessLogGroup.Arn
+      #   Format: >-
+      #     { "requestId":"$context.requestId",
+      #     "status":$context.status,
+      #     "method":"$context.httpMethod",
+      #     "path":"$context.path",
+      #     "caller":"$context.identity.caller",
+      #     "userArn":"$context.identity.userArn",
+      #     "integrationStatus":"$context.integrationStatus",
+      #     "integrationError":"$context.integrationErrorMessage",
+      #     "error":"$context.error.message"}
+
+  # RestApiAccessLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-access-logs"
+  #     RetentionInDays: 14
+
+  # RestApiResponseDefault5XX:
+  #   Type: AWS::ApiGateway::GatewayResponse
+  #   Properties:
+  #     RestApiId: !Ref RestApi
+  #     ResponseType: DEFAULT_5XX
+  #     StatusCode: '500'
+  #     ResponseTemplates:
+  #       application/json: >-
+  #         {"message":"APIGW integration error",
+  #         "requestId":"$context.requestId",
+  #         "integrationError":"$context.integrationErrorMessage"}
+
+  RestApiLambdaProxy:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}'
+      Architectures:
+        - arm64
+      Runtime: nodejs22.x
+      CodeUri: api
+      Handler: src/index.handler
+      # Tracing: Active # X-Rayを有効にする場合
+      Environment:
+        Variables:
+          USERPOOLID: !Ref UserPoolId
+          USERBUCKET: !Ref UserBucket
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Ref UserBucket
+        - LambdaInvokePolicy:
+            FunctionName: '*'
+        # Cognitoユーザープールの認証情報を取得するために必要
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:ListUsers
+              Resource:
+                - !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
+      Events:
+        AuthProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /auth/{proxy+}
+            Method: POST
+            TimeoutInMillis: 30000
+            Auth:
+              Authorizer: AWS_IAM
+              InvokeRole: '' # <-- 記述しないとアクセスできません @see https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/sam-property-function-apifunctionauth.html#sam-function-apifunctionauth-invokerole
+        UnauthProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /unauth/{proxy+}
+            Method: POST
+            TimeoutInMillis: 30000
+            Auth:
+              Authorizer: AWS_IAM
+              InvokeRole: '' # <-- 記述しないとアクセスできません @see https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/sam-property-function-apifunctionauth.html#sam-function-apifunctionauth-invokerole
+
+  # --- Cognitoユーザープールクライアント ---
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${AWS::StackName}'
+      UserPoolId: !Ref UserPoolId
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 1
+
+  # --- Cognito ID Pool ---
+
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${AWS::StackName}'
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !Sub 'cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}'
+          ServerSideTokenCheck: false
+
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt AuthRole.Arn
+        unauthenticated: !GetAtt UnauthRole.Arn
+
+  AuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-auth-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-auth-role-api-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource:
+                  - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/${Env}/POST/*'
+        - PolicyName: !Sub '${AWS::StackName}-auth-role-user-bucket-private-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  # [CAUTION] ${cognito-identity.amazonaws.com:sub} は展開せずにそのまま記述
+                  - !Join
+                    - ''
+                    - - !Sub 'arn:aws:s3:::${UserBucket}'
+                      - '/private'
+                      - '/${cognito-identity.amazonaws.com:sub}'
+                      - '/'
+                  - !Join
+                    - ''
+                    - - !Sub 'arn:aws:s3:::${UserBucket}'
+                      - '/private'
+                      - '/${cognito-identity.amazonaws.com:sub}'
+                      - '/*'
+
+  UnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-unauth-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': unauthenticated
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-unauth-role-api-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource:
+                  - !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/${Env}/POST/unauth/*'
+
+Outputs:
+  # --- 共通/リージョン ---
+  Region:
+    Description: Amplify aws_project_region
+    Value: !Sub '${AWS::Region}'
+
+  # --- Auth（Cognito） ---
+  UserPoolId:
+    Description: Amplify aws_user_pools_id
+    Value: !Ref UserPoolId
+
+  UserPoolClientId:
+    Description: Amplify aws_user_pools_web_client_id
+    Value: !Ref UserPoolClient
+
+  IdentityPoolId:
+    Description: Amplify aws_cognito_identity_pool_id
+    Value: !Ref IdentityPool
+
+  # --- Storage（S3） ---
+  S3Bucket:
+    Description: Amplify aws_user_files_s3_bucket
+    Value: !Ref UserBucket
+
+  # --- REST API（aws_cloud_logic_custom 用） ---
+  ApiEndpoint:
+    Description: Amplify aws_cloud_logic_custom[0].endpoint
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Env}'

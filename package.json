@@ -1,0 +1,50 @@
+{
+  "name": "template-app-vue-vuetify-aws",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "api"
+  ],
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --fix",
+    "format": "prettier --write src/",
+    "build:sdk": "node scripts/build-sdk/index.js",
+    "build:config": "node scripts/build-amplifyconfiguration.js"
+  },
+  "dependencies": {
+    "@fontsource/roboto": "^5.2.7",
+    "aws-amplify": "^6.15.7",
+    "vue": "^3.5.18",
+    "vue-router": "^4.5.1",
+    "vuetify": "^3.10.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.31.0",
+    "@mdi/font": "^7.4.47",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/eslint-config-prettier": "^10.2.0",
+    "ava": "^6.4.1",
+    "eslint": "^9.31.0",
+    "eslint-plugin-vue": "~10.3.0",
+    "esprima-next": "^6.0.3",
+    "globals": "^16.3.0",
+    "prettier": "3.6.2",
+    "sass": "^1.93.2",
+    "vite": "^7.0.6",
+    "vite-plugin-vue-devtools": "^8.0.0",
+    "xo": "^0.60.0"
+  },
+  "xo": {
+    "rules": {
+      "capitalized-comments": "off"
+    }
+  }
+}

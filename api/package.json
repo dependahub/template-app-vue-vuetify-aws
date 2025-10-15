@@ -1,0 +1,20 @@
+{
+  "name": "api",
+  "description": "",
+  "version": "1.0.0",
+  "license": "ISC",
+  "author": "MadakaHeri<@madakaheri>",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "xo && ava"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.155",
+    "ava": "^6.4.1",
+    "xo": "^0.60.0"
+  },
+  "dependencies": {
+    "@trusquetta/aws-cognito": "^1.2.0"
+  }
+}
